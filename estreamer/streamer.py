@@ -7,6 +7,8 @@ import socket
 import traceback
 import sys
 import struct
+import ssl
+import logging
 
 #pypi libs
 import OpenSSL.crypto as crypto
@@ -17,6 +19,17 @@ class eStreamerKeyError(Error): pass
 class eStreamerCertError(Error): pass
 class eStreamerVerifyError(Error): pass
 
+class PKCS12Manager():
+
+    def __init__(self, p12file, passphrase):
+	# open it, using password. Supply/read your own from stdin.
+	self.p12 = crypto.load_pkcs12(open(p12file, 'rb').read(), passphrase)
+
+    def getKey(self):
+        return self.p12.get_privatekey() 
+
+    def getCert(self):
+        return self.p12.get_certificate()  
 
 '''
     :host = eStreamer host
@@ -29,37 +42,75 @@ class eStreamerVerifyError(Error): pass
 class eStreamerConnection(object):
 
 
-    def __init__(self, host, port, verify, cert_path, pkey_path, pkey_passphrase=''):
+    def __init__(self, host, port, p12path, pkey_passphrase=''):
         self.host = host
         self.port = port
-        try:
-            self.pkey = crypto.load_privatekey(crypto.FILETYPE_PEM, open(pkey_path, 'rb').read(), pkey_passphrase)
-        except IOError:
-            raise eStreamerKeyError("Unable to locate key file {}".format(pkey_path))
-        except crypto.Error:
-            raise eStreamerKeyError("Invalid key file or bad passphrase {}".format(pkey_path))
-        try:
-            self.cert = crypto.load_certificate(crypto.FILETYPE_PEM, open(cert_path, 'rb').read())
-        except IOError:
-            raise eStreamerCertError("Unable to locate cert file {}".format(cert_path))
-        except crypto.Error:
-            raise eStreamerCertError("Invalid certificate {}".format(cert_path))
-        self.verify = verify
+
+	self.pkcs12 = PKCS12Manager(p12path,pkey_passphrase);
+
         self.ctx = None
         self.sock = None
         self._bytes = None
 
+	privateKey = self.pkcs12.getKey();
+
+	cryptoType = crypto.FILETYPE_PEM
+	certificate = self.pkcs12.getCert();
+
+	self.privateKeyFilepath = host+"_"+str(port)+".key"
+	self.certificateFilepath = host+"_"+str(port)+".cert"
+
+        with open( self.privateKeyFilepath, 'wb+' ) as privateKeyFile:
+            privateKeyFile.write( crypto.dump_privatekey( cryptoType, privateKey ) )
+
+        with open( self.certificateFilepath, 'wb+' ) as certificateFile:
+            certificateFile.write( crypto.dump_certificate( cryptoType, certificate ) )
+
+	self.logger = logging.getLogger( self.__class__.__name__ )
     def __enter__(self):
-        self.ctx = SSL.Context(SSL.TLSv1_METHOD)
-        if self.verify:
-            self.ctx.set_verify(SSL.VERIFY_PEER, self.validate_cert)
-            self.ctx.load_verify_locations(self.verify)
-            self.trusted_cert = crypto.load_certificate(crypto.FILETYPE_PEM, file(self.verify).read())
-        self.ctx.use_privatekey(self.pkey)
-        self.ctx.use_certificate(self.cert)
-        self.sock = SSL.Connection(self.ctx, socket.socket(socket.AF_INET, socket.SOCK_STREAM))
-        self.sock.connect((self.host, self.port))
-        return self
+
+	sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+        # Default TLS
+        tlsVersion = ssl.PROTOCOL_TLSv1
+
+        if hasattr(ssl, 'PROTOCOL_TLSv1_2'):
+             tlsVersion = ssl.PROTOCOL_TLSv1_2
+             self.logger.info('Using TLS v1.2')
+
+        else:
+             self.logger.warning('PROTOCOL_TLSv1_2 not found. Using TLS v1.0')
+
+
+	print str(tlsVersion)
+
+        self.sock = ssl.wrap_socket(
+            sock,
+            keyfile = self.privateKeyFilepath,
+            certfile = self.certificateFilepath,
+            do_handshake_on_connect = True,
+            ssl_version = tlsVersion)
+
+        try:
+            #self.sock.settimeout( 10 )
+            self.sock.connect( ( self.host, self.port ) )
+
+        except socket.timeout:
+            raise Error("Timeout")
+                 
+
+        except socket.gaierror as gex:
+            # Convert to a nicer exception
+            raise Error( 'socket.gaierror ({0})'.format(gex) )
+
+        except ssl.SSLError as sslex:
+            # Convert to a nicer exception
+	    raise Error(str(sslex))
+
+        # We're setting the socket to be blocking but with a short timeout
+        #self.sock.settimeout( 10 )
+	return self
+
 
     def __exit__(self, exc_type, exc_al, exc_tb):
         self.close()
@@ -74,7 +125,7 @@ class eStreamerConnection(object):
         return ok
 
     def close(self):
-        self.sock.shutdown()
+        self.sock.shutdown(socket.SHUT_RDWR)
         self.sock.close()
 
     @property

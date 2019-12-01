@@ -45,10 +45,10 @@ def main():
     STREAM_FLAGS = [x.lstrip(' ') for x in cfg.get('settings', 'event_types').split(',')]
     REQUEST_FLAGS = { k: v for k, v in cfg.items('flags') }
 
-    with streamer.eStreamerConnection('CHANGE_ME.SOURCEFIRE.DOMAIN', 8302, basedir + 'estreamer.cer',
-                             basedir + "CHANGEME_CLIENT_CERT", basedir + "CHANGEME_CLIENT_PRIVATE_KEY") as ec:
+    with streamer.eStreamerConnection('firepower', 8302, basedir + 'client.pkcs12', 'estreamer') as ec:
         last_stamp = getLastStamp() if getLastStamp() else 1
         # make original request
+	print str(REQUEST_FLAGS)
         re = eventrequest.RequestEvent(last_stamp, **REQUEST_FLAGS)
         resp = ec.request(re.record)
         # if extended, send stream request
@@ -60,18 +60,28 @@ def main():
            if not resp:
                resp = ec.response()
            mh = message.MessageHeader(resp)
-           if mh.type == message.MSG_TYPE_MessageBundle:
+           if mh.type == message.MSG_TYPE_NULL:
+		continue
+         
+	   print "Message Type="+str(mh.type) 
+           print mh
+           print mh.data
+	   print len(mh.data.messages) 
+           for i in range(0,len(mh.data.messages)):
+		print str(i)+": "+str(mh.data.messages[i])
+
+	   if mh.type == message.MSG_TYPE_MessageBundle:
                # get the last timestamp
                mh_obj = mh.data.data[-1]
-               ts = getattr(mh_obj, 'timestamp')
-               if ts:
+               if hasattr(mh_obj,'timestamp'): 
+                   ts = getattr(mh_obj, 'timestamp')
                    setLastStamp(ts)
                # if it's a message bundle, send a NULL response
                ping_msg = message.MessageHeader(version=1, length=0, type=0, data='')
                resp = ec.request(ping_msg.pack())
            else:
                setLastStamp(mh.data.timestamp)
-           #print repr(mh)
+           print repr(mh)
            for plgin in plugin.Plugin.plugins.values():
                plgin.callback(mh)
 
